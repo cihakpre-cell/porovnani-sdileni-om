@@ -3,88 +3,82 @@ import pandas as pd
 import io
 import re
 
-st.set_page_config(page_title="Vyhodnocení sdílení", layout="wide")
+st.set_page_config(page_title="Vyhodnocení sdílení", layout="centered")
 
-st.title("⚡ Vyhodnocení sdílení elektřiny")
+st.title("⚡ Vyhodnocení sdílení")
 
-uploaded_files = st.file_uploader("Vyberte .xlsx soubory", accept_multiple_files=True, type=['xlsx'])
+# Uploader
+uploaded_files = st.file_uploader("Nahrajte .xlsx soubory", accept_multiple_files=True, type=['xlsx'], key="file_uploader")
 
 if uploaded_files:
+    # 1. Párování souborů
     pairs = {}
     for file in uploaded_files:
         fname = file.name.strip()
         match = re.search(r'(\d{10,})', fname)
         if match:
-            om_number = match.group(1)
-            if om_number not in pairs:
-                pairs[om_number] = {'pred': None, 'po': None}
-            prefix_part = fname.split(om_number)[0].upper()
-            if 'S' in prefix_part:
-                pairs[om_number]['po'] = file
+            om = match.group(1)
+            if om not in pairs: pairs[om] = {'pred': None, 'po': None}
+            # Pokud je v názvu před číslem 'S', je to PO sdílení
+            if 'S' in fname.split(om)[0].upper():
+                pairs[om]['po'] = file
             else:
-                pairs[om_number]['pred'] = file
+                pairs[om]['pred'] = file
 
-    kompletni_pary = {om: data for om, data in pairs.items() if data['pred'] and data['po']}
+    kompletni = {om: d for om, d in pairs.items() if d['pred'] and d['po']}
     
-    if kompletni_pary:
-        st.success(f"Nalezeno {len(kompletni_pary)} kompletních dvojic.")
+    if kompletni:
+        st.success(f"Připraveno {len(kompletni)} dvojic ke zpracování.")
         
-        if st.button("🚀 Spustit výpočet a připravit soubor ke stažení"):
+        if st.button("📊 Zpracovat a vygenerovat Excel"):
             vysledky = []
-            progress_bar = st.progress(0)
-            status_text = st.empty()
+            msg = st.empty() # Prostor pro stavové zprávy
             
-            total = len(kompletni_pary)
-            
-            for i, (om, files) in enumerate(kompletni_pary.items()):
-                status_text.text(f"Zpracovávám OM {om} ({i+1}/{total})")
+            for i, (om, files) in enumerate(kompletni.items()):
+                msg.text(f"Zpracovávám: {i+1}/{len(kompletni)} (OM {om})")
                 try:
-                    # Načtení dat
-                    df_pred = pd.read_excel(files['pred'], usecols=[3, 4, 5], skiprows=1, names=['Datum', 'Cas', 'Hodnota_pred'])
-                    df_po = pd.read_excel(files['po'], usecols=[3, 4, 5], skiprows=1, names=['Datum', 'Cas', 'Hodnota_po'])
-
-                    df_pred = df_pred.dropna(subset=['Datum', 'Cas'])
-                    df_po = df_po.dropna(subset=['Datum', 'Cas'])
+                    # Načítáme pouze sloupce D, E, F (indexy 3, 4, 5)
+                    # Používáme dtype string pro datum/čas pro maximální stabilitu při spojování
+                    d1 = pd.read_excel(files['pred'], usecols=[3, 4, 5], skiprows=1, names=['D', 'C', 'V1'])
+                    d2 = pd.read_excel(files['po'], usecols=[3, 4, 5], skiprows=1, names=['D', 'C', 'V2'])
                     
-                    # Optimalizace klíče
-                    df_pred['Klic'] = df_pred['Datum'].astype(str) + " " + df_pred['Cas'].astype(str)
-                    df_po['Klic'] = df_po['Datum'].astype(str) + " " + df_po['Cas'].astype(str)
-
-                    df_merged = pd.merge(df_pred, df_po[['Klic', 'Hodnota_po']], on='Klic', how='inner')
+                    # Rychlé pročištění
+                    d1 = d1.dropna(subset=['D', 'C'])
+                    d2 = d2.dropna(subset=['D', 'C'])
                     
-                    # Výpočet rozdílu
-                    df_merged[om] = pd.to_numeric(df_merged['Hodnota_pred'], errors='coerce') - pd.to_numeric(df_merged['Hodnota_po'], errors='coerce')
-
-                    vysledky.append(df_merged[['Datum', 'Cas', om]])
+                    # Unikátní klíč pro spojení
+                    d1['K'] = d1['D'].astype(str) + d1['C'].astype(str)
+                    d2['K'] = d2['D'].astype(str) + d2['C'].astype(str)
+                    
+                    # Spojení a výpočet (rozdíl)
+                    m = pd.merge(d1, d2[['K', 'V2']], on='K', how='inner')
+                    m[om] = pd.to_numeric(m['V1'], errors='coerce') - pd.to_numeric(m['V2'], errors='coerce')
+                    
+                    vysledky.append(m[['D', 'C', om]])
                 except Exception as e:
-                    st.error(f"Chyba u OM {om}: {e}")
-                
-                progress_bar.progress((i + 1) / total)
+                    st.error(f"Chyba u {om}: {str(e)}")
 
             if vysledky:
-                status_text.text("Slučuji všechna data do jednoho souboru... (může chvíli trvat)")
-                final_df = vysledky[0]
-                for df in vysledky[1:]:
-                    final_df = pd.merge(final_df, df, on=['Datum', 'Cas'], how='outer')
-
-                # Seřazení podle času
-                final_df = final_df.sort_values(['Datum', 'Cas'])
-
-                st.success("Hotovo! Tabulka je připravena.")
+                msg.text("Slučování dat do finální tabulky...")
+                # Sloučení všech OM do jedné tabulky podle Data a Času
+                final = vysledky[0]
+                for next_df in vysledky[1:]:
+                    final = pd.merge(final, next_df, on=['D', 'C'], how='outer')
                 
-                # Export bez zobrazení velké tabulky na webu (prevence chyby removeChild)
+                final = final.rename(columns={'D': 'Datum', 'C': 'Čas'}).sort_values(['Datum', 'Čas'])
+
+                # Generování Excelu do paměti
                 output = io.BytesIO()
                 with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                    final_df.to_excel(writer, index=False)
+                    final.to_excel(writer, index=False, sheet_name='Nasdíleno')
                 
+                msg.empty()
+                st.balloons()
                 st.download_button(
-                    label="📥 STÁHNOUT VÝSLEDNÝ EXCEL", 
-                    data=output.getvalue(), 
-                    file_name="vysledek_sdileni_komplet.xlsx",
+                    label="✅ STÁHNOUT VÝSLEDNÝ EXCEL",
+                    data=output.getvalue(),
+                    file_name="vysledek_sdileni.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
-                status_text.empty()
-                progress_bar.empty()
-
-    if not kompletni_pary:
-        st.info("Nahrajte soubory pro spárování.")
+    else:
+        st.info("Nahrajte soubory. Čekám na kompletní dvojice (originál + S__verze).")
