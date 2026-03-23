@@ -5,99 +5,88 @@ import re
 
 st.set_page_config(page_title="Vyhodnocení sdílení", layout="wide")
 
-st.title("⚡ Vyhodnocení sdílení elektřiny po čtvrthodinách")
-st.write("Nahrajte všechny excelové soubory (před sdílením i po sdílení najednou). Aplikace je sama spáruje podle čísla OM, vypočítá rozdíl a vytvoří souhrnný Excel.")
+st.title("⚡ Vyhodnocení sdílení elektřiny")
+st.write("Nahrajte soubory. Pokud se nespárují, podívejte se do 'Diagnostiky souborů' níže.")
 
-# Uploader pro více souborů
-uploaded_files = st.file_uploader("Vyberte .xlsx soubory (až 66 souborů)", accept_multiple_files=True, type=['xlsx'])
+uploaded_files = st.file_uploader("Vyberte .xlsx soubory", accept_multiple_files=True, type=['xlsx'])
 
 if uploaded_files:
-    # 1. Rozřazení souborů do slovníku podle čísla OM
     pairs = {}
+    file_log = [] # Pro diagnostiku
+
     for file in uploaded_files:
-        # Najdeme číslo OM v názvu souboru (jakákoliv delší sekvence čísel)
-        match = re.search(r'(\d+)', file.name)
+        fname = file.name.strip()
+        # Hledáme dlouhé číslo OM (alespoň 10 číslic)
+        match = re.search(r'(\d{10,})', fname)
+        
         if match:
             om_number = match.group(1)
-            
             if om_number not in pairs:
                 pairs[om_number] = {'pred': None, 'po': None}
-                
-            # Pokud soubor začíná na S__, jde o data PO sdílení
-            if file.name.startswith('S__'):
+            
+            # Zjistíme, co je v názvu PŘED číslem
+            prefix_part = fname.split(om_number)[0].upper()
+            
+            # Pokud je před číslem 'S', jde o soubor PO sdílení
+            if 'S' in prefix_part:
                 pairs[om_number]['po'] = file
+                typ = "PO sdílení (S__)"
             else:
                 pairs[om_number]['pred'] = file
+                typ = "PŘED sdílením"
+            
+            file_log.append({"Název souboru": fname, "Identifikované OM": om_number, "Typ": typ})
+        else:
+            file_log.append({"Název souboru": fname, "Identifikované OM": "Nenalezeno", "Typ": "Chyba"})
 
-    # Kontrola, kolik kompletních párů se našlo
+    # Zobrazení diagnostiky pro uživatele
+    with st.expander("🔍 Diagnostika načtených souborů (klikněte pro kontrolu párování)"):
+        st.table(pd.DataFrame(file_log))
+
     kompletni_pary = {om: data for om, data in pairs.items() if data['pred'] and data['po']}
     nekompletni = [om for om, data in pairs.items() if not (data['pred'] and data['po'])]
 
-    st.info(f"Nalezeno {len(kompletni_pary)} kompletních dvojic souborů.")
+    if kompletni_pary:
+        st.success(f"Nalezeno {len(kompletni_pary)} kompletních dvojic.")
+    
     if nekompletni:
-        st.warning(f"Pro tato OM chybí jeden do páru: {', '.join(nekompletni)}")
+        st.warning(f"Chybí jeden do páru pro OM: {', '.join(nekompletni)}")
+        with st.informative_column if 'informative_column' in locals() else st.container():
+             st.info("Tip: Zkontrolujte v tabulce výše, zda jsou soubory správně rozřazeny do 'PŘED' a 'PO'.")
 
-    # 2. Zpracování dat
-    if kompletni_pary and st.button("Zpracovat data a vypočítat sdílení"):
-        with st.spinner("Zpracovávám soubory..."):
+    if kompletni_pary and st.button("Zpracovat data"):
+        with st.spinner("Počítám rozdíly..."):
             vysledky = []
-            
             for om, files in kompletni_pary.items():
                 try:
-                    # Načteme sloupce D, E, F (indexy 3, 4, 5). 
-                    # skiprows=1 přeskočí první informační řádek, aby se správně chytly hodnoty
-                    df_pred = pd.read_excel(files['pred'], usecols="D:F", skiprows=1, names=['Od_data', 'Od_casu', 'Hodnota_pred'])
-                    df_po = pd.read_excel(files['po'], usecols="D:F", skiprows=1, names=['Od_data', 'Od_casu', 'Hodnota_po'])
+                    # Čtení dat (sloupce D, E, F jsou indexy 3, 4, 5)
+                    df_pred = pd.read_excel(files['pred'], usecols=[3, 4, 5], skiprows=1, names=['Datum', 'Cas', 'Hodnota_pred'])
+                    df_po = pd.read_excel(files['po'], usecols=[3, 4, 5], skiprows=1, names=['Datum', 'Cas', 'Hodnota_po'])
 
-                    # Očištění o případné prázdné řádky na konci
-                    df_pred = df_pred.dropna(subset=['Od_data', 'Od_casu'])
-                    df_po = df_po.dropna(subset=['Od_data', 'Od_casu'])
+                    # Vyčištění a vytvoření klíče
+                    df_pred = df_pred.dropna(subset=['Datum', 'Cas'])
+                    df_po = df_po.dropna(subset=['Datum', 'Cas'])
+                    
+                    df_pred['Klic'] = df_pred['Datum'].astype(str) + " " + df_pred['Cas'].astype(str)
+                    df_po['Klic'] = df_po['Datum'].astype(str) + " " + df_po['Cas'].astype(str)
 
-                    # Vytvoření pomocného klíče pro spojení
-                    df_pred['Klic'] = df_pred['Od_data'].astype(str) + " " + df_pred['Od_casu'].astype(str)
-                    df_po['Klic'] = df_po['Od_data'].astype(str) + " " + df_po['Od_casu'].astype(str)
-
-                    # Spojení tabulek pro dané OM
+                    # Výpočet
                     df_merged = pd.merge(df_pred, df_po[['Klic', 'Hodnota_po']], on='Klic', how='inner')
+                    df_merged[om] = pd.to_numeric(df_merged['Hodnota_pred'], errors='coerce') - pd.to_numeric(df_merged['Hodnota_po'], errors='coerce')
 
-                    # Převod na čísla (pro jistotu, kdyby tam byl text) a výpočet nasdíleného množství
-                    df_merged['Hodnota_pred'] = pd.to_numeric(df_merged['Hodnota_pred'], errors='coerce').fillna(0)
-                    df_merged['Hodnota_po'] = pd.to_numeric(df_merged['Hodnota_po'], errors='coerce').fillna(0)
-                    
-                    # Výpočet (před sdílením - po sdílení = co se nasdílelo)
-                    df_merged[om] = df_merged['Hodnota_pred'] - df_merged['Hodnota_po']
-
-                    # Ponecháme jen datum, čas a vypočtený rozdíl
-                    df_final_om = df_merged[['Od_data', 'Od_casu', om]]
-                    vysledky.append(df_final_om)
-                    
+                    vysledky.append(df_merged[['Datum', 'Cas', om]])
                 except Exception as e:
-                    st.error(f"Chyba při zpracování OM {om}: {e}")
+                    st.error(f"Chyba u OM {om}: {e}")
 
-            # 3. Spojení všech výsledků do jedné velké tabulky
             if vysledky:
-                # Začneme první tabulkou
-                finalni_tabulka = vysledky[0]
-                # A postupně k ní připojíme všechny ostatní podle data a času
+                final_df = vysledky[0]
                 for df in vysledky[1:]:
-                    finalni_tabulka = pd.merge(finalni_tabulka, df, on=['Od_data', 'Od_casu'], how='outer')
+                    final_df = pd.merge(final_df, df, on=['Datum', 'Cas'], how='outer')
 
-                st.success("Zpracování dokončeno!")
+                st.dataframe(final_df.head(10))
                 
-                # Náhled
-                st.write("Náhled prvních 10 řádků výsledku:")
-                st.dataframe(finalni_tabulka.head(10))
-
-                # 4. Export do Excelu
                 output = io.BytesIO()
                 with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                    finalni_tabulka.to_excel(writer, index=False, sheet_name='Nasdilen_Mnozstvi')
+                    final_df.to_excel(writer, index=False)
                 
-                excel_data = output.getvalue()
-
-                st.download_button(
-                    label="📥 Stáhnout výsledný Excel",
-                    data=excel_data,
-                    file_name="nasdileno_po_ctvrthodinach.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                )
+                st.download_button(label="📥 Stáhnout výsledky", data=output.getvalue(), file_name="vysledek_sdileni.xlsx")
